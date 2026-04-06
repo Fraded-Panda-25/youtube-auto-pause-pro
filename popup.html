@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Auto-Pause</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="card">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="24" height="24" rx="6" fill="url(#grad)"/>
+          <path d="M9.5 8.5L16 12L9.5 15.5V8.5Z" fill="white"/>
+          <defs>
+            <linearGradient id="grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#FF4444"/>
+              <stop offset="1" stop-color="#CC0000"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <div class="header-text">
+        <h1 class="title">Auto-Pause</h1>
+        <p class="subtitle">YouTube Tab Manager</p>
+      </div>
+    </div>
+
+    <!-- Toggle -->
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <span class="toggle-label">Pause on tab switch</span>
+        <span class="toggle-desc" id="status-text">Loading…</span>
+      </div>
+      <label class="switch" id="toggle-label">
+        <input type="checkbox" id="toggle" checked />
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat" id="stat-videos">
+        <span class="stat-value" id="video-count">—</span>
+        <span class="stat-label">Videos detected</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat">
+        <span class="stat-value" id="stat-state">—</span>
+        <span class="stat-label">Extension state</span>
+      </div>
+    </div>
+
+    <!-- How it works -->
+    <div class="info-box">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" class="info-icon">
+        <circle cx="8" cy="8" r="7.5" stroke="currentColor"/>
+        <path d="M8 7v4M8 5.5V5" stroke="currentColor" stroke-linecap="round"/>
+      </svg>
+      <span>Videos paused by you won't be auto-resumed.</span>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
