@@ -3,7 +3,8 @@
  *
  * Automatically pauses YouTube videos when the user leaves the viewing context
  * (tab switch, window switch, or window blur) and resumes playback upon return.
- * Protects manual user pauses and handles YouTube SPA dynamic video elements cleanly.
+ * Protects manual user pauses, handles YouTube SPA dynamic video elements,
+ * and manages Picture-in-Picture (PiP) behavior based on user toggle settings.
  */
 
 (function () {
@@ -12,6 +13,7 @@
   // ─── State ────────────────────────────────────────────────────────────────
 
   let enabled = true;
+  let blockPiP = false;
   let windowFocused = document.hasFocus();
   let tabActive = !document.hidden;
 
@@ -47,7 +49,16 @@
     return getVideos().filter((v) => !v.paused && !v.ended && v.readyState > 2).length;
   }
 
-  /** Attach pause/play listeners to detect explicit user actions */
+  /** Safely exit Picture-in-Picture if active */
+  function exitPiPIfActive() {
+    if (typeof document.exitPictureInPicture === 'function' && document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {
+        // Silently catch browser PiP rejection
+      });
+    }
+  }
+
+  /** Attach pause/play/PiP listeners to detect user actions & PiP events */
   function attachVideoListeners(video) {
     if (!video || trackedVideos.has(video)) return;
     trackedVideos.add(video);
@@ -67,17 +78,46 @@
       userPausedSet.delete(video);
       extensionPausedSet.delete(video);
     });
+
+    // Guard against entering PiP while context is inactive and blockPiP is enabled
+    video.addEventListener('enterpictureinpicture', () => {
+      if (blockPiP && !isViewingContextActive()) {
+        exitPiPIfActive();
+      }
+    });
   }
 
-  // ─── Core Playback Reconciliation ────────────────────────────────────────
+  // ─── Core Playback & PiP Reconciliation ────────────────────────────────────
 
   function reconcilePlaybackState() {
     const videos = getVideos();
     videos.forEach(attachVideoListeners);
 
-    if (!enabled) return;
-
     const active = isViewingContextActive();
+
+    // ─── Picture-in-Picture Management ───
+    if (blockPiP) {
+      if (!active) {
+        // Exit active PiP and set disablePictureInPicture attribute on inactive context
+        exitPiPIfActive();
+        videos.forEach((video) => {
+          try { video.disablePictureInPicture = true; } catch {}
+        });
+      } else {
+        // Restore PiP permission when context is active
+        videos.forEach((video) => {
+          try { video.disablePictureInPicture = false; } catch {}
+        });
+      }
+    } else {
+      // Toggle OFF: Do not interfere with PiP functionality
+      videos.forEach((video) => {
+        try { video.disablePictureInPicture = false; } catch {}
+      });
+    }
+
+    // ─── Auto-Pause / Resume Management ───
+    if (!enabled) return;
 
     if (!active) {
       // Pause playing videos that were not manually paused by the user
@@ -189,10 +229,15 @@
         reconcilePlaybackState();
       }
       sendResponse({ ok: true, enabled });
+    } else if (message.type === 'SET_BLOCK_PIP') {
+      blockPiP = message.blockPiP;
+      reconcilePlaybackState();
+      sendResponse({ ok: true, blockPiP });
     } else if (message.type === 'GET_STATUS') {
       const videos = getVideos();
       sendResponse({
         enabled,
+        blockPiP,
         totalVideos: videos.length,
         playingVideos: getPlayingVideoCount(),
         isContextActive: isViewingContextActive()
@@ -205,16 +250,22 @@
   // ─── Storage Change Listener ──────────────────────────────────────────────
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes.enabled) {
-      enabled = changes.enabled.newValue;
-      if (!enabled) {
-        getVideos().forEach((video) => {
-          if (extensionPausedSet.has(video)) {
-            extensionPausedSet.delete(video);
-            video.play().catch(() => {});
-          }
-        });
-      } else {
+    if (areaName === 'local') {
+      if (changes.enabled) {
+        enabled = changes.enabled.newValue;
+        if (!enabled) {
+          getVideos().forEach((video) => {
+            if (extensionPausedSet.has(video)) {
+              extensionPausedSet.delete(video);
+              video.play().catch(() => {});
+            }
+          });
+        } else {
+          reconcilePlaybackState();
+        }
+      }
+      if (changes.blockPiP) {
+        blockPiP = changes.blockPiP.newValue;
         reconcilePlaybackState();
       }
     }
@@ -222,8 +273,9 @@
 
   // ─── Initialization ───────────────────────────────────────────────────────
 
-  chrome.storage.local.get({ enabled: true }, (result) => {
+  chrome.storage.local.get({ enabled: true, blockPiP: false }, (result) => {
     enabled = result.enabled;
+    blockPiP = result.blockPiP;
     reconcilePlaybackState();
   });
 })();
