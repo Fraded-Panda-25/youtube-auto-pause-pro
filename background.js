@@ -10,9 +10,13 @@
 // ─── Storage Initialization ──────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const data = await chrome.storage.local.get('enabled');
-  if (data.enabled === undefined) {
-    await chrome.storage.local.set({ enabled: true });
+  const data = await chrome.storage.local.get(['enabled', 'blockPiP']);
+  const updates = {};
+  if (data.enabled === undefined) updates.enabled = true;
+  if (data.blockPiP === undefined) updates.blockPiP = false;
+
+  if (Object.keys(updates).length > 0) {
+    await chrome.storage.local.set(updates);
   }
 });
 
