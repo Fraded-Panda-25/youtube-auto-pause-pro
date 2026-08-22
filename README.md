@@ -1,4 +1,4 @@
-# 🚀 YouTube Auto Pause Chrome Extension
+# 🚀 YouTube Auto Pause Pro Chrome Extension
 
 A simple and powerful Chrome Extension that automatically pauses YouTube videos when you switch tabs and resumes playback when you return.
 
