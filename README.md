@@ -216,7 +216,9 @@ Click the extension icon in the toolbar to see:
 
 The extension popup appears when you click the toolbar icon. With auto-pause enabled, videos pause when you leave and resume when you return.
 
-![Popup with auto-pause enabled](./screenshots/popup-on.png)
+<!-- ![Popup with auto-pause enabled](./screnshoets/popup-on.png) -->
+<img src="./screnshoets/popup-on.png" alt="Popup with auto-pause enabled">
+png
 
 - **Auto-pause toggle** is ON (green) - videos will pause on tab/window switch
 - **Status** shows ON
@@ -226,7 +228,10 @@ The extension popup appears when you click the toolbar icon. With auto-pause ena
 
 When disabled, the extension does not control playback.
 
-![Popup with auto-pause disabled](./screenshots/popup-off.png)
+<!-- ![Popup with auto-pause disabled](./screenshots/popup-off.png) -->
+
+<img src="./screenshots/popup-off.png" alt="Popup with auto-pause disabled">
+
 
 - **Auto-pause toggle** is OFF (gray) - videos play normally regardless of focus
 - **Status** shows OFF
@@ -235,7 +240,8 @@ When disabled, the extension does not control playback.
 
 The PiP block toggle prevents Picture-in-Picture when the viewing context is inactive.
 
-![Popup with PiP block enabled](./screenshots/pip-block.png)
+<!-- ![Popup with PiP block enabled](./screenshots/pip-block.png) -->
+<img src="./screenshots/pip-block.png" alt="Popup with PiP block enabled">
 
 - **Auto-pause** is ON
 - **PiP toggle** is ON (green) - PiP will be exited and blocked when you leave
