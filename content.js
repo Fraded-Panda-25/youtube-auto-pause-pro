@@ -5,6 +5,13 @@
  * (tab switch, window switch, or window blur) and resumes playback upon return.
  * Protects manual user pauses, handles YouTube SPA dynamic video elements,
  * and manages Picture-in-Picture (PiP) behavior based on user toggle settings.
+ *
+ * Critical design note: The `play` event listener is the primary guard against
+ * YouTube's internal player overriding our pause in a background tab. Because
+ * Chromium throttles setTimeout/setInterval/rAF to 4-second ticks in hidden tabs,
+ * any timer-based re-pause would be delayed by exactly 4 seconds. The `play` event
+ * fires synchronously on the HTMLMediaElement and is NOT subject to background
+ * throttling, making it the only reliable mechanism.
  */
 
 (function () {
@@ -37,11 +44,13 @@
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  /** Determines if the current YouTube tab viewing context is active & focused */
+  /**
+   * Determines if the current YouTube tab viewing context is active.
+   * A context is active if the tab is visible, the tab is active, and the
+   * browser window is focused.
+   */
   function isViewingContextActive() {
-    const hidden = document.hidden;
-    const focus = document.hasFocus();
-    return !hidden && isTabActive && (isWindowFocused || focus);
+    return !document.hidden && isTabActive && isWindowFocused;
   }
 
   /** Get all <video> elements present in the DOM */
@@ -63,8 +72,13 @@
     }
   }
 
-  /** Pause helper executing both HTMLMediaElement and YouTube Player API calls */
+  /**
+   * Pause a video element. Sets handshake flag so the `pause` event listener
+   * knows this was extension-initiated and does not record it as a user pause.
+   */
   function pauseVideoElement(video) {
+    if (video.paused) return; // Already paused, skip
+
     programmaticPauseSet.add(video);
     extensionPausedSet.add(video);
     try {
@@ -74,18 +88,12 @@
       extensionPausedSet.delete(video);
       console.warn('YouTube Auto-Pause: pause error', err);
     }
-
-    try {
-      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-      if (player && typeof player.pauseVideo === 'function') {
-        player.pauseVideo();
-      }
-    } catch {
-      // Ignore player API errors
-    }
   }
 
-  /** Play helper executing both HTMLMediaElement and YouTube Player API calls */
+  /**
+   * Resume a video element. Sets handshake flag so the `play` event listener
+   * knows this was extension-initiated and does not re-pause it.
+   */
   function playVideoElement(video) {
     programmaticPlaySet.add(video);
     extensionPausedSet.delete(video);
@@ -94,6 +102,8 @@
       const playPromise = video.play();
       if (playPromise && typeof playPromise.then === 'function') {
         playPromise.catch((err) => {
+          // Play was rejected (e.g. autoplay policy). Restore extensionPaused
+          // state so a future reconciliation can retry.
           extensionPausedSet.add(video);
           programmaticPlaySet.delete(video);
           console.warn('YouTube Auto-Pause: play promise rejected', err);
@@ -104,18 +114,16 @@
       programmaticPlaySet.delete(video);
       console.warn('YouTube Auto-Pause: play call error', err);
     }
-
-    try {
-      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-      if (player && typeof player.playVideo === 'function') {
-        player.playVideo();
-      }
-    } catch {
-      // Ignore player API errors
-    }
   }
 
-  /** Attach pause/play/PiP listeners to detect user actions & PiP events */
+  /**
+   * Attach pause/play/PiP listeners to a video element.
+   *
+   * The `play` event listener is the CRITICAL guard: if YouTube's internal
+   * DASH player, ad stitcher, or quality-switch logic calls video.play() in a
+   * background tab after the extension paused it, this handler fires
+   * synchronously (not throttled by Chromium) and immediately re-pauses.
+   */
   function attachVideoListeners(video) {
     if (!video || trackedVideos.has(video)) return;
     trackedVideos.add(video);
@@ -127,7 +135,8 @@
         return;
       }
 
-      // If paused while viewing context was active and not extension-driven, record manual user pause
+      // If paused while viewing context is active and not extension-driven,
+      // this is a manual user pause (click, spacebar, YouTube UI)
       if (isViewingContextActive()) {
         userPausedSet.add(video);
         extensionPausedSet.delete(video);
@@ -135,11 +144,35 @@
     });
 
     video.addEventListener('play', () => {
-      // If play was initiated by extension, consume handshake flag
+      // If play was initiated by the extension (resuming on tab return),
+      // consume handshake flag and allow it through
       if (programmaticPlaySet.has(video)) {
         programmaticPlaySet.delete(video);
+        userPausedSet.delete(video);
+        extensionPausedSet.delete(video);
+        return;
       }
-      // User manually played the video
+
+      // ── CRITICAL GUARD ──
+      // If the viewing context is NOT active (tab hidden, window unfocused)
+      // and the extension is enabled, this play event was triggered by
+      // YouTube's internal player (DASH rebuffer, ad transition, quality
+      // switch, stream keepalive). Immediately re-pause it synchronously.
+      // This fires on the HTMLMediaElement event, NOT subject to Chrome's
+      // 4-second background timer throttling.
+      if (enabled && !isViewingContextActive()) {
+        programmaticPauseSet.add(video);
+        extensionPausedSet.add(video);
+        try {
+          video.pause();
+        } catch {
+          programmaticPauseSet.delete(video);
+          extensionPausedSet.delete(video);
+        }
+        return;
+      }
+
+      // Context IS active: user manually played the video
       userPausedSet.delete(video);
       extensionPausedSet.delete(video);
     });
@@ -155,9 +188,10 @@
   // ─── Core Playback & PiP Reconciliation ────────────────────────────────────
 
   function reconcilePlaybackState() {
-    // Sync current native DOM states
-    if (document.hasFocus()) isWindowFocused = true;
-    if (document.hidden) isTabActive = false;
+    // Sync DOM visibility state
+    if (document.hidden) {
+      isTabActive = false;
+    }
 
     const videos = getVideos();
     videos.forEach(attachVideoListeners);
@@ -194,6 +228,7 @@
     if (!active) {
       // Pause playing videos that were not manually paused by the user
       videos.forEach((video) => {
+        // A currently playing video cannot be in the user-paused state
         if (!video.paused) {
           userPausedSet.delete(video);
         }
@@ -214,52 +249,51 @@
 
   // ─── Event Handlers ───────────────────────────────────────────────────────
 
-  function triggerImmediateReconciliation() {
-    reconcilePlaybackState();
-    requestAnimationFrame(() => {
-      reconcilePlaybackState();
-    });
-  }
-
-  // Document visibility change (tab switch within browser)
+  // Document visibility change (tab switch within browser).
+  // Executed synchronously — no setTimeout/rAF to avoid 4s background throttle.
   document.addEventListener('visibilitychange', () => {
-    isTabActive = !document.hidden;
-    if (!document.hidden) {
+    if (document.hidden) {
+      isTabActive = false;
+    } else {
+      isTabActive = true;
       isWindowFocused = true;
     }
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 
   // Window focus & blur
   window.addEventListener('focus', () => {
     isWindowFocused = true;
     isTabActive = !document.hidden;
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 
   window.addEventListener('blur', () => {
     isWindowFocused = document.hasFocus();
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 
   // YouTube SPA Navigation Events
   const handleSPANavigation = () => {
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
     setTimeout(() => {
-      triggerImmediateReconciliation();
-    }, 300);
+      reconcilePlaybackState();
+    }, 200);
   };
 
   document.addEventListener('yt-navigate-finish', handleSPANavigation);
   document.addEventListener('spadated', handleSPANavigation);
   window.addEventListener('popstate', handleSPANavigation);
 
-  // Dynamic Video Mutation Observer
+  // Dynamic Video Mutation Observer — only used for discovering new <video>
+  // elements after SPA navigation. The debounce timer may be throttled in
+  // background tabs, but the `play` event listener (above) is the primary
+  // guard for background-tab re-pause, not this observer.
   const observer = new MutationObserver(() => {
     if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
     mutationDebounceTimer = setTimeout(() => {
       reconcilePlaybackState();
-    }, 150);
+    }, 100);
   });
 
   observer.observe(document.documentElement || document.body, {
@@ -277,12 +311,11 @@
       if (typeof message.tabActive === 'boolean') {
         isTabActive = message.tabActive;
       }
-      triggerImmediateReconciliation();
+      reconcilePlaybackState();
       sendResponse({ ok: true });
     } else if (message.type === 'SET_ENABLED') {
       enabled = message.enabled;
       if (!enabled) {
-        // If extension is disabled while videos are paused by extension, resume them
         const videos = getVideos();
         videos.forEach((video) => {
           if (extensionPausedSet.has(video)) {
@@ -290,12 +323,12 @@
           }
         });
       } else {
-        triggerImmediateReconciliation();
+        reconcilePlaybackState();
       }
       sendResponse({ ok: true, enabled });
     } else if (message.type === 'SET_BLOCK_PIP') {
       blockPiP = message.blockPiP;
-      triggerImmediateReconciliation();
+      reconcilePlaybackState();
       sendResponse({ ok: true, blockPiP });
     } else if (message.type === 'GET_STATUS') {
       const videos = getVideos();
@@ -324,12 +357,12 @@
             }
           });
         } else {
-          triggerImmediateReconciliation();
+          reconcilePlaybackState();
         }
       }
       if (changes.blockPiP) {
         blockPiP = changes.blockPiP.newValue;
-        triggerImmediateReconciliation();
+        reconcilePlaybackState();
       }
     }
   });
@@ -339,6 +372,6 @@
   chrome.storage.local.get({ enabled: true, blockPiP: false }, (result) => {
     enabled = result.enabled;
     blockPiP = result.blockPiP;
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 })();
