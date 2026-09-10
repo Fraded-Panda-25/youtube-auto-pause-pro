@@ -14,8 +14,7 @@
 
   let enabled = true;
   let blockPiP = false;
-  let windowFocused = document.hasFocus();
-  let tabActive = !document.hidden;
+  let isWindowFocused = document.hasFocus();
 
   /** Track videos programmatically paused by this extension */
   const extensionPausedSet = new WeakSet();
@@ -23,11 +22,14 @@
   /** Track videos explicitly paused by the user */
   const userPausedSet = new WeakSet();
 
+  /** Handshake tracking for extension-initiated pauses */
+  const programmaticPauseSet = new WeakSet();
+
+  /** Handshake tracking for extension-initiated play calls */
+  const programmaticPlaySet = new WeakSet();
+
   /** Track videos with event listeners attached */
   const trackedVideos = new WeakSet();
-
-  /** Guard flag to distinguish extension pause/play from manual user actions */
-  let isProcessingAction = false;
 
   /** Debounce timer for DOM mutations */
   let mutationDebounceTimer = null;
@@ -36,7 +38,7 @@
 
   /** Determines if the current YouTube tab viewing context is active & focused */
   function isViewingContextActive() {
-    return !document.hidden && windowFocused && tabActive;
+    return !document.hidden && (isWindowFocused || document.hasFocus());
   }
 
   /** Get all <video> elements present in the DOM */
@@ -64,8 +66,13 @@
     trackedVideos.add(video);
 
     video.addEventListener('pause', () => {
-      if (isProcessingAction) return;
-      // If paused while context was active, record as explicit user pause
+      // If pause was initiated by extension, consume the handshake flag and ignore
+      if (programmaticPauseSet.has(video)) {
+        programmaticPauseSet.delete(video);
+        return;
+      }
+
+      // If paused while viewing context was active and not extension-driven, record manual user pause
       if (isViewingContextActive()) {
         userPausedSet.add(video);
         extensionPausedSet.delete(video);
@@ -73,8 +80,11 @@
     });
 
     video.addEventListener('play', () => {
-      if (isProcessingAction) return;
-      // User manually played the video; clear pause records
+      // If play was initiated by extension, consume handshake flag
+      if (programmaticPlaySet.has(video)) {
+        programmaticPlaySet.delete(video);
+      }
+      // Whenever a video plays, it is no longer in user-paused state
       userPausedSet.delete(video);
       extensionPausedSet.delete(video);
     });
@@ -90,6 +100,11 @@
   // ─── Core Playback & PiP Reconciliation ────────────────────────────────────
 
   function reconcilePlaybackState() {
+    // Refresh window focus state check
+    if (document.hasFocus()) {
+      isWindowFocused = true;
+    }
+
     const videos = getVideos();
     videos.forEach(attachVideoListeners);
 
@@ -98,21 +113,24 @@
     // ─── Picture-in-Picture Management ───
     if (blockPiP) {
       if (!active) {
-        // Exit active PiP and set disablePictureInPicture attribute on inactive context
         exitPiPIfActive();
         videos.forEach((video) => {
-          try { video.disablePictureInPicture = true; } catch {}
+          try {
+            if (!video.disablePictureInPicture) video.disablePictureInPicture = true;
+          } catch {}
         });
       } else {
-        // Restore PiP permission when context is active
         videos.forEach((video) => {
-          try { video.disablePictureInPicture = false; } catch {}
+          try {
+            if (video.disablePictureInPicture) video.disablePictureInPicture = false;
+          } catch {}
         });
       }
     } else {
-      // Toggle OFF: Do not interfere with PiP functionality
       videos.forEach((video) => {
-        try { video.disablePictureInPicture = false; } catch {}
+        try {
+          if (video.disablePictureInPicture) video.disablePictureInPicture = false;
+        } catch {}
       });
     }
 
@@ -122,15 +140,20 @@
     if (!active) {
       // Pause playing videos that were not manually paused by the user
       videos.forEach((video) => {
+        // Active playing video cannot be in userPaused state
+        if (!video.paused) {
+          userPausedSet.delete(video);
+        }
+
         if (!video.paused && !userPausedSet.has(video)) {
-          isProcessingAction = true;
+          programmaticPauseSet.add(video);
+          extensionPausedSet.add(video);
           try {
             video.pause();
-            extensionPausedSet.add(video);
           } catch (err) {
+            programmaticPauseSet.delete(video);
+            extensionPausedSet.delete(video);
             console.warn('YouTube Auto-Pause: pause error', err);
-          } finally {
-            isProcessingAction = false;
           }
         }
       });
@@ -138,25 +161,23 @@
       // Resume videos previously paused by this extension
       videos.forEach((video) => {
         if (video.paused && extensionPausedSet.has(video) && !userPausedSet.has(video)) {
-          isProcessingAction = true;
+          programmaticPlaySet.add(video);
           extensionPausedSet.delete(video);
 
           try {
             const playPromise = video.play();
             if (playPromise && typeof playPromise.then === 'function') {
-              playPromise
-                .catch((err) => {
-                  console.warn('YouTube Auto-Pause: play promise rejected', err);
-                })
-                .finally(() => {
-                  isProcessingAction = false;
-                });
-            } else {
-              isProcessingAction = false;
+              playPromise.catch((err) => {
+                // If play promise rejected, restore extensionPaused state so it can retry later
+                extensionPausedSet.add(video);
+                programmaticPlaySet.delete(video);
+                console.warn('YouTube Auto-Pause: play promise rejected', err);
+              });
             }
           } catch (err) {
+            extensionPausedSet.add(video);
+            programmaticPlaySet.delete(video);
             console.warn('YouTube Auto-Pause: play call error', err);
-            isProcessingAction = false;
           }
         }
       });
@@ -165,27 +186,38 @@
 
   // ─── Event Handlers ───────────────────────────────────────────────────────
 
+  // Trigger reconciliation immediately and on next animation frame for instant response
+  function triggerImmediateReconciliation() {
+    reconcilePlaybackState();
+    requestAnimationFrame(() => {
+      reconcilePlaybackState();
+    });
+  }
+
   // Document visibility change (tab switch within browser)
   document.addEventListener('visibilitychange', () => {
-    tabActive = !document.hidden;
-    reconcilePlaybackState();
+    if (!document.hidden) {
+      isWindowFocused = true;
+    }
+    triggerImmediateReconciliation();
   });
 
-  // Window focus & blur fallback
+  // Window focus & blur
   window.addEventListener('focus', () => {
-    windowFocused = true;
-    reconcilePlaybackState();
+    isWindowFocused = true;
+    triggerImmediateReconciliation();
   });
 
   window.addEventListener('blur', () => {
-    windowFocused = false;
-    reconcilePlaybackState();
+    isWindowFocused = false;
+    triggerImmediateReconciliation();
   });
 
   // YouTube SPA Navigation Events
   const handleSPANavigation = () => {
+    triggerImmediateReconciliation();
     setTimeout(() => {
-      reconcilePlaybackState();
+      triggerImmediateReconciliation();
     }, 300);
   };
 
@@ -198,7 +230,7 @@
     if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
     mutationDebounceTimer = setTimeout(() => {
       reconcilePlaybackState();
-    }, 250);
+    }, 150);
   });
 
   observer.observe(document.documentElement || document.body, {
@@ -210,9 +242,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'FOCUS_STATE_UPDATE') {
-      if (typeof message.windowFocused === 'boolean') windowFocused = message.windowFocused;
-      if (typeof message.tabActive === 'boolean') tabActive = message.tabActive;
-      reconcilePlaybackState();
+      if (typeof message.windowFocused === 'boolean') {
+        isWindowFocused = message.windowFocused;
+      }
+      triggerImmediateReconciliation();
       sendResponse({ ok: true });
     } else if (message.type === 'SET_ENABLED') {
       enabled = message.enabled;
@@ -222,16 +255,19 @@
         videos.forEach((video) => {
           if (extensionPausedSet.has(video)) {
             extensionPausedSet.delete(video);
-            video.play().catch(() => {});
+            programmaticPlaySet.add(video);
+            video.play().catch(() => {
+              programmaticPlaySet.delete(video);
+            });
           }
         });
       } else {
-        reconcilePlaybackState();
+        triggerImmediateReconciliation();
       }
       sendResponse({ ok: true, enabled });
     } else if (message.type === 'SET_BLOCK_PIP') {
       blockPiP = message.blockPiP;
-      reconcilePlaybackState();
+      triggerImmediateReconciliation();
       sendResponse({ ok: true, blockPiP });
     } else if (message.type === 'GET_STATUS') {
       const videos = getVideos();
@@ -257,16 +293,19 @@
           getVideos().forEach((video) => {
             if (extensionPausedSet.has(video)) {
               extensionPausedSet.delete(video);
-              video.play().catch(() => {});
+              programmaticPlaySet.add(video);
+              video.play().catch(() => {
+                programmaticPlaySet.delete(video);
+              });
             }
           });
         } else {
-          reconcilePlaybackState();
+          triggerImmediateReconciliation();
         }
       }
       if (changes.blockPiP) {
         blockPiP = changes.blockPiP.newValue;
-        reconcilePlaybackState();
+        triggerImmediateReconciliation();
       }
     }
   });
@@ -276,6 +315,6 @@
   chrome.storage.local.get({ enabled: true, blockPiP: false }, (result) => {
     enabled = result.enabled;
     blockPiP = result.blockPiP;
-    reconcilePlaybackState();
+    triggerImmediateReconciliation();
   });
 })();
