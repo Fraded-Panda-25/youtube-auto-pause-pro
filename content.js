@@ -37,11 +37,12 @@
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  /** Determines if the current YouTube tab viewing context is active & focused */
+  /**
+   * Determines if the current YouTube tab viewing context is active.
+   * A context is active if the tab is visible, tab is active, and the browser window is focused.
+   */
   function isViewingContextActive() {
-    const hidden = document.hidden;
-    const focus = document.hasFocus();
-    return !hidden && isTabActive && (isWindowFocused || focus);
+    return !document.hidden && isTabActive && isWindowFocused;
   }
 
   /** Get all <video> elements present in the DOM */
@@ -155,9 +156,10 @@
   // ─── Core Playback & PiP Reconciliation ────────────────────────────────────
 
   function reconcilePlaybackState() {
-    // Sync current native DOM states
-    if (document.hasFocus()) isWindowFocused = true;
-    if (document.hidden) isTabActive = false;
+    // Keep DOM states in sync
+    if (document.hidden) {
+      isTabActive = false;
+    }
 
     const videos = getVideos();
     videos.forEach(attachVideoListeners);
@@ -212,42 +214,38 @@
     }
   }
 
-  // ─── Event Handlers ───────────────────────────────────────────────────────
+  // ─── Synchronous Event Handlers ───────────────────────────────────────────
 
-  function triggerImmediateReconciliation() {
-    reconcilePlaybackState();
-    requestAnimationFrame(() => {
-      reconcilePlaybackState();
-    });
-  }
-
-  // Document visibility change (tab switch within browser)
+  // Document visibility change (tab switch within browser) - executed SYNCHRONOUSLY to prevent 4s background throttling
   document.addEventListener('visibilitychange', () => {
-    isTabActive = !document.hidden;
-    if (!document.hidden) {
+    if (document.hidden) {
+      isTabActive = false;
+      reconcilePlaybackState();
+    } else {
+      isTabActive = true;
       isWindowFocused = true;
+      reconcilePlaybackState();
     }
-    triggerImmediateReconciliation();
   });
 
   // Window focus & blur
   window.addEventListener('focus', () => {
     isWindowFocused = true;
     isTabActive = !document.hidden;
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 
   window.addEventListener('blur', () => {
     isWindowFocused = document.hasFocus();
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 
   // YouTube SPA Navigation Events
   const handleSPANavigation = () => {
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
     setTimeout(() => {
-      triggerImmediateReconciliation();
-    }, 300);
+      reconcilePlaybackState();
+    }, 200);
   };
 
   document.addEventListener('yt-navigate-finish', handleSPANavigation);
@@ -259,7 +257,7 @@
     if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
     mutationDebounceTimer = setTimeout(() => {
       reconcilePlaybackState();
-    }, 150);
+    }, 100);
   });
 
   observer.observe(document.documentElement || document.body, {
@@ -277,7 +275,8 @@
       if (typeof message.tabActive === 'boolean') {
         isTabActive = message.tabActive;
       }
-      triggerImmediateReconciliation();
+      // Execute reconciliation synchronously on background IPC dispatch
+      reconcilePlaybackState();
       sendResponse({ ok: true });
     } else if (message.type === 'SET_ENABLED') {
       enabled = message.enabled;
@@ -290,12 +289,12 @@
           }
         });
       } else {
-        triggerImmediateReconciliation();
+        reconcilePlaybackState();
       }
       sendResponse({ ok: true, enabled });
     } else if (message.type === 'SET_BLOCK_PIP') {
       blockPiP = message.blockPiP;
-      triggerImmediateReconciliation();
+      reconcilePlaybackState();
       sendResponse({ ok: true, blockPiP });
     } else if (message.type === 'GET_STATUS') {
       const videos = getVideos();
@@ -324,12 +323,12 @@
             }
           });
         } else {
-          triggerImmediateReconciliation();
+          reconcilePlaybackState();
         }
       }
       if (changes.blockPiP) {
         blockPiP = changes.blockPiP.newValue;
-        triggerImmediateReconciliation();
+        reconcilePlaybackState();
       }
     }
   });
@@ -339,6 +338,6 @@
   chrome.storage.local.get({ enabled: true, blockPiP: false }, (result) => {
     enabled = result.enabled;
     blockPiP = result.blockPiP;
-    triggerImmediateReconciliation();
+    reconcilePlaybackState();
   });
 })();
