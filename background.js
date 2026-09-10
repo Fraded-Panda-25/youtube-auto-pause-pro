@@ -1,8 +1,9 @@
 /**
  * YouTube Auto-Pause — background.js (Service Worker)
  *
- * Tracks tab activation and browser window focus changes, and notifies YouTube content scripts
- * so playback can be reliably paused/resumed across windows and desktop app switches.
+ * Ultra-low-latency event dispatcher for tab activation and window focus changes.
+ * Notifies YouTube content scripts in real-time so playback can be reliably
+ * paused/resumed with zero user-perceivable delay.
  */
 
 'use strict';
@@ -23,34 +24,24 @@ chrome.runtime.onInstalled.addListener(async () => {
 // ─── Messaging Helper ───────────────────────────────────────────────────────
 
 /**
- * Safely send a message to a specific tab, ignoring errors if content script is unavailable.
+ * Safely send a message to a specific tab without blocking or throwing.
  */
-async function safeSendMessage(tabId, message) {
-  try {
-    await chrome.tabs.sendMessage(tabId, message);
-  } catch {
-    // Content script not injected or tab closed; ignore safely
-  }
+function safeSendMessage(tabId, message) {
+  return chrome.tabs.sendMessage(tabId, message).catch(() => {
+    // Content script not ready or tab closed; ignore safely
+  });
 }
 
 /**
- * Broadcast tab/window focus state to YouTube tabs.
+ * Broadcast focus & active state directly to all YouTube tabs with zero async IPC delays.
  */
-async function broadcastFocusState(focusedWindowIdOverride) {
+async function notifyYouTubeTabs(focusedWindowId) {
   try {
-    const [youtubeTabs, lastFocusedWindow] = await Promise.all([
-      chrome.tabs.query({ url: '*://*.youtube.com/*' }),
-      chrome.windows.getLastFocused()
-    ]);
-
+    const youtubeTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
     if (!youtubeTabs || youtubeTabs.length === 0) return;
 
-    const focusedWindowId = focusedWindowIdOverride !== undefined 
-      ? focusedWindowIdOverride 
-      : (lastFocusedWindow && lastFocusedWindow.focused ? lastFocusedWindow.id : null);
-
     const promises = youtubeTabs.map((tab) => {
-      const isWindowFocused = focusedWindowId !== null && tab.windowId === focusedWindowId;
+      const isWindowFocused = focusedWindowId !== null && focusedWindowId !== undefined && tab.windowId === focusedWindowId;
       const isTabActive = tab.active;
 
       return safeSendMessage(tab.id, {
@@ -68,23 +59,47 @@ async function broadcastFocusState(focusedWindowIdOverride) {
 
 // ─── Event Listeners ────────────────────────────────────────────────────────
 
-// Window focus changed (e.g. user Alt+Tabs to another application or window)
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
+// Window focus changed (e.g. user Alt+Tabs or Command+Tabs to another application/window)
+chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    await broadcastFocusState(null);
+    // All browser windows lost focus
+    notifyYouTubeTabs(null);
   } else {
-    await broadcastFocusState(windowId);
+    // Specific window gained focus
+    notifyYouTubeTabs(windowId);
   }
 });
 
-// Tab activation changed (e.g. user switches tabs within the browser)
-chrome.tabs.onActivated.addListener(async () => {
-  await broadcastFocusState();
+// Tab activation changed (e.g. user switches tabs within browser)
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const youtubeTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
+    if (!youtubeTabs || youtubeTabs.length === 0) return;
+
+    const promises = youtubeTabs.map((tab) => {
+      const isTabActive = tab.id === activeInfo.tabId;
+      return safeSendMessage(tab.id, {
+        type: 'FOCUS_STATE_UPDATE',
+        tabActive: isTabActive
+      });
+    });
+
+    await Promise.all(promises);
+  } catch {
+    // Ignore runtime errors
+  }
 });
 
 // Tab URL update (e.g. tab finishes loading YouTube)
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.includes('youtube.com')) {
-    await broadcastFocusState();
+    chrome.windows.getLastFocused().then((win) => {
+      const isWindowFocused = win && win.focused && win.id === tab.windowId;
+      safeSendMessage(tabId, {
+        type: 'FOCUS_STATE_UPDATE',
+        windowFocused: isWindowFocused,
+        tabActive: tab.active
+      });
+    }).catch(() => {});
   }
 });
