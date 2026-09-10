@@ -36,29 +36,45 @@ async function safeSendMessage(tabId, message) {
 /**
  * Broadcast tab/window focus state to YouTube tabs.
  */
-async function broadcastFocusState() {
-  const youtubeTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
-  if (youtubeTabs.length === 0) return;
+async function broadcastFocusState(focusedWindowIdOverride) {
+  try {
+    const [youtubeTabs, lastFocusedWindow] = await Promise.all([
+      chrome.tabs.query({ url: '*://*.youtube.com/*' }),
+      chrome.windows.getLastFocused()
+    ]);
 
-  const lastFocusedWindow = await chrome.windows.getLastFocused();
+    if (!youtubeTabs || youtubeTabs.length === 0) return;
 
-  for (const tab of youtubeTabs) {
-    const isWindowFocused = lastFocusedWindow && lastFocusedWindow.focused && lastFocusedWindow.id === tab.windowId;
-    const isTabActive = tab.active;
+    const focusedWindowId = focusedWindowIdOverride !== undefined 
+      ? focusedWindowIdOverride 
+      : (lastFocusedWindow && lastFocusedWindow.focused ? lastFocusedWindow.id : null);
 
-    await safeSendMessage(tab.id, {
-      type: 'FOCUS_STATE_UPDATE',
-      windowFocused: isWindowFocused,
-      tabActive: isTabActive
+    const promises = youtubeTabs.map((tab) => {
+      const isWindowFocused = focusedWindowId !== null && tab.windowId === focusedWindowId;
+      const isTabActive = tab.active;
+
+      return safeSendMessage(tab.id, {
+        type: 'FOCUS_STATE_UPDATE',
+        windowFocused: isWindowFocused,
+        tabActive: isTabActive
+      });
     });
+
+    await Promise.all(promises);
+  } catch {
+    // Ignore runtime errors during state broadcast
   }
 }
 
 // ─── Event Listeners ────────────────────────────────────────────────────────
 
 // Window focus changed (e.g. user Alt+Tabs to another application or window)
-chrome.windows.onFocusChanged.addListener(async () => {
-  await broadcastFocusState();
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    await broadcastFocusState(null);
+  } else {
+    await broadcastFocusState(windowId);
+  }
 });
 
 // Tab activation changed (e.g. user switches tabs within the browser)
